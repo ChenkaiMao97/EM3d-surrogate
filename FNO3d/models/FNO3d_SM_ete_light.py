@@ -69,22 +69,23 @@ class BasicBlock3D_Periodic(nn.Module):
         self.conv2 = nn.Conv3d(planes, planes, kernel_size=3,
                                stride=1, padding=0, bias=False)
         # self.bn2 = nn.BatchNorm2d(planes)
-
-        self.shortcut = nn.Sequential(nn.Identity())
-        if stride != 1 or in_planes != self.expansion*planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv3d(in_planes, self.expansion*planes,
-                          kernel_size=1, stride=stride, bias=False),
-                # nn.BatchNorm2d(self.expansion*planes)
-            )
         self.use_shortcut = use_shortcut
+        if self.use_shortcut:
+            self.shortcut = nn.Sequential(nn.Identity())
+            if stride != 1 or in_planes != self.expansion*planes:
+                self.shortcut = nn.Sequential(
+                    nn.Conv3d(in_planes, self.expansion*planes,
+                              kernel_size=1, stride=stride, bias=False),
+                    # nn.BatchNorm2d(self.expansion*planes)
+                )
+        
 
     def forward(self, x):
         out = F.leaky_relu(self.conv1(self.padding1(x)), negative_slope=self.ALPHA)
         out = self.conv2(self.padding2(out))
+        out = F.leaky_relu(out, negative_slope=self.ALPHA)
         if self.use_shortcut:
             out += self.shortcut(x)
-            out = F.leaky_relu(out, negative_slope=self.ALPHA)
         return out
 
 ################################################################
@@ -92,7 +93,7 @@ class BasicBlock3D_Periodic(nn.Module):
 ################################################################
 
 class Modulated_SpectralConv3d(nn.Module):
-    def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
+    def __init__(self, in_channels, out_channels, hidden_freq, ALPHA, modes1, modes2, modes3):
         super(Modulated_SpectralConv3d, self).__init__()
 
         """
@@ -101,17 +102,22 @@ class Modulated_SpectralConv3d(nn.Module):
 
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.hidden_freq = hidden_freq
+        self.ALPHA = ALPHA
+
         self.modes1 = modes1 #Number of Fourier modes to multiply, at most floor(N/2) + 1
         self.modes2 = modes2
         self.modes3 = modes3
 
-        self.scale = (1 / (in_channels * out_channels))
-        # self.scale = (1 / out_channels)
+        self.scale = (1 / hidden_freq)
+        # self.scale = 10
+        self.weights = nn.Parameter(self.scale * torch.rand(self.in_channels, self.out_channels, 4, self.hidden_freq, dtype=torch.float32))
+        self.mlp = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3*2, bias=False)
+
+        # self.weights2 = nn.Parameter(self.scale * torch.rand(out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
+        # self.weights3 = nn.Parameter(self.scale * torch.rand(out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
+        # self.weights4 = nn.Parameter(self.scale * torch.rand(out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
         
-        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
-        self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
-        self.weights3 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
-        self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
     # Complex multiplication
     def compl_mul3d(self, input, weights):
         # (batch, in_channel, x,y,t ), (in_channel, out_channel, x,y,t) -> (batch, out_channel, x,y,t)
@@ -122,17 +128,20 @@ class Modulated_SpectralConv3d(nn.Module):
         #Compute Fourier coeffcients up to factor of e^(- something constant)
         x_ft = torch.fft.rfftn(x, dim=[-3,-2,-1])
 
-        mod1, mod2, mod3, mod4= mods
+        mod1, mod2, mod3, mod4 = mods
+        weights = self.mlp(self.weights).reshape((self.in_channels, self.out_channels, 4, self.modes1, self.modes2, self.modes3, 2))
+        weights = torch.view_as_complex(weights)
+        
         # Multiply relevant Fourier modes
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-3), x.size(-2), x.size(-1)//2+1, dtype=torch.cfloat, device=x.device)
         out_ft[:, :, :self.modes1, :self.modes2, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], torch.view_as_complex(self.weights1)*mod1)
+            self.compl_mul3d(x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], weights[:,:,0]*mod1)
         out_ft[:, :, -self.modes1:, :self.modes2, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3], torch.view_as_complex(self.weights2)*mod2)
+            self.compl_mul3d(x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3], weights[:,:,1]*mod2)
         out_ft[:, :, :self.modes1, -self.modes2:, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3], torch.view_as_complex(self.weights3)*mod3)
+            self.compl_mul3d(x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3], weights[:,:,2]*mod3)
         out_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], torch.view_as_complex(self.weights4)*mod4)
+            self.compl_mul3d(x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], weights[:,:,3]*mod4)
 
         #Return to physical space
         x = torch.fft.irfftn(out_ft, s=(x.size(-3), x.size(-2), x.size(-1)))
@@ -183,7 +192,7 @@ class FNO_multimodal_3d(nn.Module):
         self.ws = []
 
         for i in range(self.num_fourier_layers):
-            self.convs.append(Modulated_SpectralConv3d(self.width, self.width, self.modes1, self.modes2, self.modes3))
+            self.convs.append(Modulated_SpectralConv3d(self.width, self.width, self.hidden_freq, self.ALPHA, self.modes1, self.modes2, self.modes3))
             # self.ws.append(nn.Conv3d(self.width, self.width, 1))
             self.ws.append(BasicBlock3D_Periodic(self.width, self.width, self.ALPHA, use_shortcut=False, periodic=self.periodic))
         self.convs = nn.ModuleList(self.convs)
@@ -193,15 +202,15 @@ class FNO_multimodal_3d(nn.Module):
         self.fc2 = nn.Linear(128, args.outc)
 
         # the modulation branch of the network:
-        self.m_basic1 = BasicBlock3D_Periodic(self.input_data_channels, self.width, self.ALPHA, 1, periodic=self.periodic)
-        self.m_basic2 = BasicBlock3D_Periodic(self.width, 1, self.ALPHA, 1, periodic=self.periodic)
+        self.m_basic1 = BasicBlock3D_Periodic(self.input_data_channels, self.width, self.ALPHA, periodic=self.periodic)
+        self.m_basic2 = BasicBlock3D_Periodic(self.width, 1, self.ALPHA, periodic=self.periodic)
         # self.m_basic3 = BasicBlock3D_Periodic(self.width, self.width, self.ALPHA, 1, periodic=self.periodic)
         self.m_bc1 = nn.Linear(int(self.sizex*self.sizey*self.sizez/64), self.hidden_freq)
         self.m_bc2_1 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
         self.m_bc2_2 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
         self.m_bc2_3 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
         self.m_bc2_4 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
-        
+
     def forward(self, yeex, yeey, yeez):
         batch_size = yeez.shape[0] # shape: [bs, sx, sy, sz]
         grid = self.get_grid(yeez.shape, yeez.device) # shape: [bs, sx, sy, sz, 3]
@@ -232,13 +241,12 @@ class FNO_multimodal_3d(nn.Module):
         for i in range(self.num_fourier_layers-1):
             x1 = self.convs[i](x, mods)
             x2 = self.ws[i](x)
-
-            # x = F.leaky_relu(x1 + x2 + x, negative_slope=self.ALPHA)
             x = F.leaky_relu(x1 + x2, negative_slope=self.ALPHA) + x
+            # x = F.gelu(x)
 
         x1 = self.convs[-1](x, mods)
         x2 = self.ws[-1](x)
-        x = x1 + x2
+        x = x1 + x2 + x
 
         _,_,n,m,l = x.shape
         x = x[..., :n-self.padding_x, :m-self.padding_y, :l-self.padding_z]

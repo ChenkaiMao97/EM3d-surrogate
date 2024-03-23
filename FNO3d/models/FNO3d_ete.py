@@ -79,13 +79,16 @@ class FNO_multimodal_3d(nn.Module):
         output shape: (batchsize, x=64, y=64, t=40, c=1)
         """
 
-        self.modes1 = args.f_modes
-        self.modes2 = args.f_modes
-        self.modes3 = args.f_modes
+        self.modes1 = args.f_modes_x
+        self.modes2 = args.f_modes_y
+        self.modes3 = args.f_modes_z
         self.width = args.HIDDEN_DIM
-        self.padding = args.z_padding # pad the domain if input is non-periodic
         
-        self.input_data_channels = 6
+        self.padding_x = args.x_padding 
+        self.padding_y = args.y_padding 
+        self.padding_z = args.z_padding 
+
+        self.input_data_channels = 4
         self.fc0 = nn.Linear(self.input_data_channels, self.width)
         # input channel is 12: the solution of the first 10 timesteps + 3 locations (u(1, x, y), ..., u(10, x, y),  x, y, t)
 
@@ -117,17 +120,16 @@ class FNO_multimodal_3d(nn.Module):
         self.fc1 = nn.Linear(self.width, 128)
         self.fc2 = nn.Linear(128, args.outc)
 
-    def forward(self, yeex, yeey, yeez):
-        batch_size = yeex.shape[0] # shape: [bs, sx, sy, sz]
-        grid = self.get_grid(yeex.shape, yeex.device) # shape: [bs, sx, sy, sz, 3]
+    def forward(self, yeez):
+        batch_size = yeez.shape[0] # shape: [bs, sx, sy, sz]
+        grid = self.get_grid(yeez.shape, yeez.device) # shape: [bs, sx, sy, sz, 3]
 
-        input_data = torch.cat((yeex[:,:,:,:,None], yeey[:,:,:,:,None], yeez[:,:,:,:,None], grid), dim=-1) # shape: [bs, sx, sy, sz, 6]
+        input_data = torch.cat((yeez[:,:,:,:,None], grid), dim=-1) # shape: [bs, sx, sy, sz, 6]
 
         x = self.fc0(input_data) # shape: [16, 96, 96, 64, 8]
         x = x.permute(0, 4, 1, 2, 3)
 
-        if self.padding > 0:
-            x = F.pad(x, [0, self.padding]) # padding (0, self.padding) for z dim
+        x = F.pad(x, [0, self.padding_z, 0, self.padding_y, 0, self.padding_x]) # padding (0, self.padding) for z dim
 
         # x.shape: [16, 8, 96, 96, 84]
 
@@ -142,9 +144,9 @@ class FNO_multimodal_3d(nn.Module):
         x2 = self.ws[-1](x)
         x = x1 + x2 + x
 
-        if self.padding > 0:
-            x = x[..., :-self.padding]
-
+        _,_,n,m,l = x.shape
+        x = x[..., :n-self.padding_x, :m-self.padding_y, :l-self.padding_z]
+        
         # x.shape: [16, 8, 96, 96, 64]
 
         x = x.permute(0, 2, 3, 4, 1) # pad the domain if input is non-periodic

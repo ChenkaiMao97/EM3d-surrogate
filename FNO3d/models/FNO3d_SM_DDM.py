@@ -16,15 +16,13 @@ from timeit import default_timer
 class BasicBlock3D(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, ALPHA, stride=1):
+    def __init__(self, in_planes, planes, ALPHA, kernel_size=3, stride=1, use_shortcut=True):
         super(BasicBlock3D, self).__init__()
+        assert kernel_size%2 ==1, "kernel size should be an odd number"
         self.ALPHA = ALPHA
-        self.conv1 = nn.Conv3d(
-            in_planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        # self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv3d(planes, planes, kernel_size=3,
-                               stride=1, padding=1, bias=False)
-        # self.bn2 = nn.BatchNorm2d(planes)
+        self.conv1 = nn.Conv3d(in_planes, planes, kernel_size=kernel_size, stride=1, padding=int((kernel_size-1)/2), bias=False)
+        self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size,stride=1, padding=int((kernel_size-1)/2), bias=False)
+        self.use_shortcut = use_shortcut
 
         self.shortcut = nn.Sequential(nn.Identity())
         if stride != 1 or in_planes != self.expansion*planes:
@@ -37,36 +35,9 @@ class BasicBlock3D(nn.Module):
     def forward(self, x):
         out = F.leaky_relu(self.conv1(x), negative_slope=self.ALPHA)
         out = self.conv2(out)
-        out += self.shortcut(x)
-        out = F.leaky_relu(out, negative_slope=self.ALPHA)
-        return out
-
-class BasicBlock3D_without_shorcut(nn.Module):
-    expansion = 1
-
-    def __init__(self, in_planes, planes, ALPHA, stride=1):
-        super(BasicBlock3D_without_shorcut, self).__init__()
-        self.ALPHA = ALPHA
-        self.conv1 = nn.Conv3d(
-            in_planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
-        # self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv3d(planes, planes, kernel_size=3,
-                               stride=1, padding=1, bias=False)
-        # self.bn2 = nn.BatchNorm2d(planes)
-
-        # self.shortcut = nn.Sequential(nn.Identity())
-        # if stride != 1 or in_planes != self.expansion*planes:
-        #     self.shortcut = nn.Sequential(
-        #         nn.Conv3d(in_planes, self.expansion*planes,
-        #                   kernel_size=1, stride=stride, bias=False),
-        #         # nn.BatchNorm2d(self.expansion*planes)
-        #     )
-
-    def forward(self, x):
-        out = F.leaky_relu(self.conv1(x), negative_slope=self.ALPHA)
-        out = self.conv2(out)
-        # out += self.shortcut(x)
-        # out = F.leaky_relu(out, negative_slope=self.ALPHA)
+        if self.use_shortcut:
+            out += self.shortcut(x)
+            out = F.leaky_relu(out, negative_slope=self.ALPHA)
         return out
 
 ################################################################
@@ -139,6 +110,8 @@ class FNO_multimodal_3d(nn.Module):
         self.modes2 = args.f_modes
         self.modes3 = args.f_modes
         self.width = args.HIDDEN_DIM
+        self.hidden_freq = args.HIDDEN_DIM_freq
+
         self.padding = args.padding # pad the domain if input is non-periodic
 
         self.sizex = args.cube_size
@@ -158,7 +131,7 @@ class FNO_multimodal_3d(nn.Module):
         for i in range(self.num_fourier_layers):
             self.convs.append(Modulated_SpectralConv3d(self.width, self.width, self.modes1, self.modes2, self.modes3))
             # self.ws.append(nn.Conv3d(self.width, self.width, 1))
-            self.ws.append(BasicBlock3D_without_shorcut(self.width, self.width, self.ALPHA))
+            self.ws.append(BasicBlock3D(self.width, self.width, self.ALPHA, kernel_size=3, use_shortcut=False))
 
         self.convs = nn.ModuleList(self.convs)
         self.ws = nn.ModuleList(self.ws)
@@ -167,15 +140,15 @@ class FNO_multimodal_3d(nn.Module):
         self.fc2 = nn.Linear(128, args.outc)
 
         # the modulation branch of the network:
-        self.m_basic1 = BasicBlock3D(self.input_data_channels, self.width, self.ALPHA, 1)
-        self.m_basic2 = BasicBlock3D(self.width, self.width, self.ALPHA, 1)
-        self.m_basic3 = BasicBlock3D(self.width, self.width, self.ALPHA, 1)
-        self.m_bc1 = nn.Linear(int(self.width*self.sizex*self.sizey*self.sizez/512), self.modes1*self.modes2*self.modes3)
-
-        self.m_bc2_1 = nn.Linear(self.modes1*self.modes2*self.modes3, self.modes1*self.modes2*self.modes3)
-        self.m_bc2_2 = nn.Linear(self.modes1*self.modes2*self.modes3, self.modes1*self.modes2*self.modes3)
-        self.m_bc2_3 = nn.Linear(self.modes1*self.modes2*self.modes3, self.modes1*self.modes2*self.modes3)
-        self.m_bc2_4 = nn.Linear(self.modes1*self.modes2*self.modes3, self.modes1*self.modes2*self.modes3)
+        self.m_basic1 = BasicBlock3D(self.input_data_channels, self.width, self.ALPHA, kernel_size=3, stride=1)
+        self.m_basic2 = BasicBlock3D(self.width, self.width, self.ALPHA, kernel_size=3, stride=1)
+        self.m_basic3 = BasicBlock3D(self.width, self.width, self.ALPHA, kernel_size=3, stride=1)
+        
+        self.m_bc1 = nn.Linear(int(self.width*self.sizex*self.sizey*self.sizez/512), self.hidden_freq)
+        self.m_bc2_1 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
+        self.m_bc2_2 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
+        self.m_bc2_3 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
+        self.m_bc2_4 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
 
     def forward(self, yeez, bcs):
         batch_size = yeez.shape[0] # shape: [bs, sx, sy, sz]
@@ -184,13 +157,12 @@ class FNO_multimodal_3d(nn.Module):
         bc_data = torch.zeros((yeez.shape[0], yeez.shape[1], yeez.shape[2], yeez.shape[3], 6)).to(yeez.device)
 
         # print("shs:", yeez.shape, bcs.shape)
-        for channel in range(6): # Ex_r, Ex_i, Ey_r, Ey_i, Ez_r, Ez_i
-            bc_data[:,-1,:,:,channel] = bcs[:,:,:,0,channel]
-            bc_data[:,0 ,:,:,channel] = bcs[:,:,:,1,channel]
-            bc_data[:,:,-1,:,channel] = bcs[:,:,:,2,channel]
-            bc_data[:,:,0 ,:,channel] = bcs[:,:,:,3,channel]
-            bc_data[:,:,:,-1,channel] = bcs[:,:,:,4,channel]
-            bc_data[:,:,:,0 ,channel] = bcs[:,:,:,5,channel]
+        bc_data[:,-1,:,:,:] = bcs[:,:,:,0,:]
+        bc_data[:,0 ,:,:,:] = bcs[:,:,:,1,:]
+        bc_data[:,:,-1,:,:] = bcs[:,:,:,2,:]
+        bc_data[:,:,0 ,:,:] = bcs[:,:,:,3,:]
+        bc_data[:,:,:,-1,:] = bcs[:,:,:,4,:]
+        bc_data[:,:,:,0 ,:] = bcs[:,:,:,5,:]
 
         # input_data = torch.cat((yeex[:,:,:,:,None], yeey[:,:,:,:,None], yeez[:,:,:,:,None], bc_data, grid), dim=-1) # shape: [bs, sx, sy, sz, 12]
         input_data = torch.cat((yeez[:,:,:,:,None], bc_data, grid), dim=-1) # shape: [bs, sx, sy, sz, 10]
@@ -199,7 +171,7 @@ class FNO_multimodal_3d(nn.Module):
         mod = F.avg_pool3d(self.m_basic1(mod_data),2)
         mod = F.avg_pool3d(self.m_basic2(mod),2)
         mod = F.avg_pool3d(self.m_basic3(mod),2)
-        mod = self.m_bc1(mod.reshape((batch_size, -1)))
+        mod = F.leaky_relu(self.m_bc1(mod.reshape((batch_size, -1))), negative_slope=self.ALPHA)
         mod1 = self.m_bc2_1(mod).reshape((batch_size, 1,1, self.modes1,self.modes2,self.modes3))
         mod2 = self.m_bc2_2(mod).reshape((batch_size, 1,1, self.modes1,self.modes2,self.modes3))
         mod3 = self.m_bc2_3(mod).reshape((batch_size, 1,1, self.modes1,self.modes2,self.modes3))

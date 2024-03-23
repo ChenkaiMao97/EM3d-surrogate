@@ -9,8 +9,8 @@ import sys
 sys.path.append("../models")
 
 sys.path.append("../dataloaders")
-# from simulation_dataset_ete import SimulationDataset
-from simulation_dataset_ete_super_pixel import SimulationDataset
+
+from simulation_dataset_ete_aperiodic_Hfields import SimulationDataset
 
 sys.path.append("../utils")
 from ete_physics import *
@@ -106,6 +106,11 @@ elif args.model_file == "UNet3d_ete":
 else:
     raise ValueError(f"no model file named {args.model_file}")
 
+C_0 = 299792458.13099605
+EPSILON_0 = 8.85418782e-12
+MU_0 = 1.25663706e-6
+dL = 25e-9
+wavelength = 800e-9
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -253,7 +258,10 @@ def train(rank, args, train_ds, test_ds, means):
 
     running_data_loss = 1.
     running_inner_loss = 10.
+
+    omega = 2 * np.pi * C_0 / wavelength
     
+    H_mult = torch.tensor([5e6,5e6,1e6,1e6,2.5e6,2.5e6]).cuda()
     for step in range(start_epoch, args.epoch):
         train_sampler.set_epoch(step)
         test_sampler.set_epoch(step)
@@ -283,49 +291,65 @@ def train(rank, args, train_ds, test_ds, means):
                 logits = logits.permute((0,2,3,4,1))
             else:
                 logits = logits.reshape(y_batch_train.shape) # [bs, sx, sy, sz, 6] (6 = x,y,z + 3 grids)
-            data_loss = loss_fn(logits, y_batch_train)
-            loss = args.data_weight*data_loss
+            
+            Ex = y_batch_train[:, :, :, :, 0] + 1j*y_batch_train[:, :, :, :, 1]
+            Ey = y_batch_train[:, :, :, :, 2] + 1j*y_batch_train[:, :, :, :, 3]
+            Ez = y_batch_train[:, :, :, :, 4] + 1j*y_batch_train[:, :, :, :, 5]
+            Hx, Hy, Hz = E_to_H_batched_GPU(Ex, Ey, Ez, dL, omega, MU_0 = MU_0, bloch_vector=None)
+
+            Hy_batch_train = torch.stack((Hx.real*H_mult[0], Hx.imag*H_mult[1], Hy.real*H_mult[2], Hy.imag*H_mult[3], Hz.real*H_mult[4], Hz.imag*H_mult[5]), dim=-1)
+
+            data_loss = loss_fn(logits, Hy_batch_train)
 
             running_data_loss = 0.95*running_data_loss + 0.05*data_loss
 
-            # comppute physical loss:
-            # physical loss for the inner pixels:
+            # # comppute physical loss:
+            # # physical loss for the inner pixels:
             # Ex = logits[:, :, :, :, 0]*means[0] + 1j*logits[:, :, :, :, 1]*means[1]
             # Ey = logits[:, :, :, :, 2]*means[2] + 1j*logits[:, :, :, :, 3]*means[3]
             # Ez = logits[:, :, :, :, 4]*means[4] + 1j*logits[:, :, :, :, 5]*means[5]
-
             # Hx, Hy, Hz = E_to_H_batched_GPU(Ex, Ey, Ez, dL, omega, MU_0 = MU_0, bloch_vector=None)
-
             # eps_grid = (yeex_batch_train, yeey_batch_train, yeez_batch_train)
-
             # Ex_FD, Ey_FD, Ez_FD = H_to_E_batched_GPU(Hx, Hy, Hz, dL, omega, eps_grid, EPSILON_0 = EPSILON_0, bloch_vector=None)
 
             # # print("sh: ", FD_Hy.shape, logits.shape)
-            # inner_loss = 1/6*(loss_fn(Ex_FD.real[:,:,:,1:-1]/means[0], logits[:, :, :, 1:-1, 0]) +\
-            #                   loss_fn(Ex_FD.imag[:,:,:,1:-1]/means[1], logits[:, :, :, 1:-1, 1]) +\
-            #                   loss_fn(Ey_FD.real[:,:,:,1:-1]/means[2], logits[:, :, :, 1:-1, 2]) +\
-            #                   loss_fn(Ey_FD.imag[:,:,:,1:-1]/means[3], logits[:, :, :, 1:-1, 3]) +\
-            #                   loss_fn(Ez_FD.real[:,:,:,1:-1]/means[4], logits[:, :, :, 1:-1, 4]) +\
-            #                   loss_fn(Ez_FD.imag[:,:,:,1:-1]/means[5], logits[:, :, :, 1:-1, 5]))
-            inner_loss=torch.tensor(0.)
+            # inner_loss = 1/6*(loss_fn(Ex_FD.real[:,1:-1,1:-1,1:-1]/means[0], logits[:,1:-1,1:-1,1:-1,0]) +\
+            #                   loss_fn(Ex_FD.imag[:,1:-1,1:-1,1:-1]/means[1], logits[:,1:-1,1:-1,1:-1,1]) +\
+            #                   loss_fn(Ey_FD.real[:,1:-1,1:-1,1:-1]/means[2], logits[:,1:-1,1:-1,1:-1,2]) +\
+            #                   loss_fn(Ey_FD.imag[:,1:-1,1:-1,1:-1]/means[3], logits[:,1:-1,1:-1,1:-1,3]) +\
+            #                   loss_fn(Ez_FD.real[:,1:-1,1:-1,1:-1]/means[4], logits[:,1:-1,1:-1,1:-1,4]) +\
+            #                   loss_fn(Ez_FD.imag[:,1:-1,1:-1,1:-1]/means[5], logits[:,1:-1,1:-1,1:-1,5]))
+            inner_loss = torch.tensor([0.]).cuda()
 
             running_inner_loss = 0.95*running_inner_loss + 0.05*inner_loss
+            loss = args.data_weight*data_loss + reg_norm*args.inner_weight*inner_loss
 
-            # if idx%100==0:
-            #     print(f"data_loss: {loss.item()}, reg_inner {reg_inner.item()}, reg_bc {phys_reg_bc.item()}")
-            
-            loss += reg_norm*args.inner_weight*inner_loss
-                
+            ###### sanity check #######
+            # Ex_gt = y_batch_train[:, :, :, :, 0]*means[0] + 1j*y_batch_train[:, :, :, :, 1]*means[1]
+            # Ey_gt = y_batch_train[:, :, :, :, 2]*means[2] + 1j*y_batch_train[:, :, :, :, 3]*means[3]
+            # Ez_gt = y_batch_train[:, :, :, :, 4]*means[4] + 1j*y_batch_train[:, :, :, :, 5]*means[5]
+            # Hx_gt, Hy_gt, Hz_gt = E_to_H_batched_GPU(Ex_gt, Ey_gt, Ez_gt, dL, omega, MU_0 = MU_0, bloch_vector=None)
+            # eps_grid = (yeex_batch_train, yeey_batch_train, yeez_batch_train)
+            # Ex_FD_gt, Ey_FD_gt, Ez_FD_gt = H_to_E_batched_GPU(Hx_gt, Hy_gt, Hz_gt, dL, omega, eps_grid, EPSILON_0 = EPSILON_0, bloch_vector=None)
+            # inner_loss_gt = 1/6*(loss_fn(Ex_FD_gt.real[:,1:-1,1:-1,1:-1]/means[0], y_batch_train[:,1:-1,1:-1,1:-1,0]) +\
+            #                      loss_fn(Ex_FD_gt.imag[:,1:-1,1:-1,1:-1]/means[1], y_batch_train[:,1:-1,1:-1,1:-1,1]) +\
+            #                      loss_fn(Ey_FD_gt.real[:,1:-1,1:-1,1:-1]/means[2], y_batch_train[:,1:-1,1:-1,1:-1,2]) +\
+            #                      loss_fn(Ey_FD_gt.imag[:,1:-1,1:-1,1:-1]/means[3], y_batch_train[:,1:-1,1:-1,1:-1,3]) +\
+            #                      loss_fn(Ez_FD_gt.real[:,1:-1,1:-1,1:-1]/means[4], y_batch_train[:,1:-1,1:-1,1:-1,4]) +\
+            #                      loss_fn(Ez_FD_gt.imag[:,1:-1,1:-1,1:-1]/means[5], y_batch_train[:,1:-1,1:-1,1:-1,5]))
+            # print(f"sanity: physics loss for gt: {inner_loss_gt}")
+            ###########################
+
             loss.backward()
             optimizer.step()
 
-            if (idx + 1) % 5 == 0 and rank==0:
+            if (idx + 1) % 20 == 0 and rank==0:
                 print('Epoch [{}/{}], Step [{}/{}], data loss: {:.4f}, inner loss: {:.4f}'.format(
                     step + 1,
                     args.epoch,
                     idx + 1,
                     total_step,
-                    loss.item(),
+                    data_loss.item(),
                     inner_loss.item(),
                     )
                 )
@@ -335,12 +359,12 @@ def train(rank, args, train_ds, test_ds, means):
                 lr_scheduler.step()
 
             if rank==0 and idx == 0:
-                plot_3slices(logits[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Ex_r_train.png", my_cm=plt.cm.seismic)
-                plot_3slices(y_batch_train[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Ex_r_train.png", my_cm=plt.cm.seismic)
-                plot_3slices(logits[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Ey_r_train.png", my_cm=plt.cm.seismic)
-                plot_3slices(y_batch_train[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Ey_r_train.png", my_cm=plt.cm.seismic)
-                plot_3slices(logits[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Ez_r_train.png", my_cm=plt.cm.seismic)
-                plot_3slices(y_batch_train[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Ez_r_train.png", my_cm=plt.cm.seismic)
+                plot_3slices(logits[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Hx_r_train.png", my_cm=plt.cm.seismic)
+                plot_3slices(Hy_batch_train[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Hx_r_train.png", my_cm=plt.cm.seismic)
+                plot_3slices(logits[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Hy_r_train.png", my_cm=plt.cm.seismic)
+                plot_3slices(Hy_batch_train[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Hy_r_train.png", my_cm=plt.cm.seismic)
+                plot_3slices(logits[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Hz_r_train.png", my_cm=plt.cm.seismic)
+                plot_3slices(Hy_batch_train[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Hz_r_train.png", my_cm=plt.cm.seismic)
                 plot_3slices(yeez_batch_train[0,:,:,:].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_yeez_train.png", cm_zero_center=False)
                 # plot_3slices(y_batch_train[0,:,:,:,2].detach().cpu().numpy()-logits[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_error_Ey_r_train.png", my_cm=plt.cm.seismic)
                        
@@ -349,7 +373,7 @@ def train(rank, args, train_ds, test_ds, means):
         checkpoint = {
                     'epoch': step,
                     'model': model,
-                    'state_dict': model.state_dict(),
+                    # 'state_dict': model.state_dict(),
                     'optimizer': optimizer,
                     'lr_scheduler': lr_scheduler
                  }
@@ -377,7 +401,13 @@ def train(rank, args, train_ds, test_ds, means):
                     else:
                         logits = logits.reshape(y_batch_test.shape)
 
-                    data_loss = loss_fn(logits, y_batch_test)
+                    Ex = y_batch_test[:, :, :, :, 0] + 1j*y_batch_test[:, :, :, :, 1]
+                    Ey = y_batch_test[:, :, :, :, 2] + 1j*y_batch_test[:, :, :, :, 3]
+                    Ez = y_batch_test[:, :, :, :, 4] + 1j*y_batch_test[:, :, :, :, 5]
+                    Hx, Hy, Hz = E_to_H_batched_GPU(Ex, Ey, Ez, dL, omega, MU_0 = MU_0, bloch_vector=None)
+                    Hy_batch_test = torch.stack((Hx.real*H_mult[0], Hx.imag*H_mult[1], Hy.real*H_mult[2], Hy.imag*H_mult[3], Hz.real*H_mult[4], Hz.imag*H_mult[5]), dim=-1)
+
+                    data_loss = loss_fn(logits, Hy_batch_test)
 
                     test_data_loss += data_loss
 
@@ -386,30 +416,28 @@ def train(rank, args, train_ds, test_ds, means):
                     # Ez = logits[:, :, :, :, 4]*means[4] + 1j*logits[:, :, :, :, 5]*means[5]
 
                     # Hx, Hy, Hz = E_to_H_batched_GPU(Ex, Ey, Ez, dL, omega, MU_0 = MU_0, bloch_vector=None)
-
                     # eps_grid = (yeex_batch_test, yeey_batch_test, yeez_batch_test)
-
                     # Ex_FD, Ey_FD, Ez_FD = H_to_E_batched_GPU(Hx, Hy, Hz, dL, omega, eps_grid, EPSILON_0 = EPSILON_0, bloch_vector=None)
 
-                    # # print("sh: ", FD_Hy.shape, logits.shape)
-                    # test_inner_loss = 1/6*(loss_fn(Ex_FD.real[:,:,:,1:-1]/means[0], logits[:, :, :, 1:-1, 0]) +\
-                    #                   loss_fn(Ex_FD.imag[:,:,:,1:-1]/means[1], logits[:, :, :, 1:-1, 1]) +\
-                    #                   loss_fn(Ey_FD.real[:,:,:,1:-1]/means[2], logits[:, :, :, 1:-1, 2]) +\
-                    #                   loss_fn(Ey_FD.imag[:,:,:,1:-1]/means[3], logits[:, :, :, 1:-1, 3]) +\
-                    #                   loss_fn(Ez_FD.real[:,:,:,1:-1]/means[4], logits[:, :, :, 1:-1, 4]) +\
-                    #                   loss_fn(Ez_FD.imag[:,:,:,1:-1]/means[5], logits[:, :, :, 1:-1, 5]))
-                    test_inner_loss = torch.tensor(0.)
+                    # # # print("sh: ", FD_Hy.shape, logits.shape)
+                    # test_inner_loss = 1/6*(loss_fn(Ex_FD.real[:,1:-1,1:-1,1:-1]/means[0], logits[:,1:-1,1:-1,1:-1, 0]) +\
+                    #                        loss_fn(Ex_FD.imag[:,1:-1,1:-1,1:-1]/means[1], logits[:,1:-1,1:-1,1:-1, 1]) +\
+                    #                        loss_fn(Ey_FD.real[:,1:-1,1:-1,1:-1]/means[2], logits[:,1:-1,1:-1,1:-1, 2]) +\
+                    #                        loss_fn(Ey_FD.imag[:,1:-1,1:-1,1:-1]/means[3], logits[:,1:-1,1:-1,1:-1, 3]) +\
+                    #                        loss_fn(Ez_FD.real[:,1:-1,1:-1,1:-1]/means[4], logits[:,1:-1,1:-1,1:-1, 4]) +\
+                    #                        loss_fn(Ez_FD.imag[:,1:-1,1:-1,1:-1]/means[5], logits[:,1:-1,1:-1,1:-1, 5]))
+                    test_inner_loss = torch.tensor([0.]).cuda()
 
                     if rank==0 and idx == 0:
-                        plot_3slices(logits[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Ex_r.png", my_cm=plt.cm.seismic)
-                        plot_3slices(y_batch_test[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Ex_r.png", my_cm=plt.cm.seismic)
-                        plot_3slices(logits[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Ey_r.png", my_cm=plt.cm.seismic)
-                        plot_3slices(y_batch_test[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Ey_r.png", my_cm=plt.cm.seismic)
-                        plot_3slices(logits[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Ez_r.png", my_cm=plt.cm.seismic)
-                        plot_3slices(y_batch_test[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Ez_r.png", my_cm=plt.cm.seismic)
+                        plot_3slices(logits[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Hx_r.png", my_cm=plt.cm.seismic)
+                        plot_3slices(Hy_batch_test[0,:,:,:,0].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Hx_r.png", my_cm=plt.cm.seismic)
+                        plot_3slices(logits[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Hy_r.png", my_cm=plt.cm.seismic)
+                        plot_3slices(Hy_batch_test[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Hy_r.png", my_cm=plt.cm.seismic)
+                        plot_3slices(logits[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_output_Hz_r.png", my_cm=plt.cm.seismic)
+                        plot_3slices(Hy_batch_test[0,:,:,:,4].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_gt_Hz_r.png", my_cm=plt.cm.seismic)
                         plot_3slices(yeez_batch_test[0,:,:,:].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_yeez.png", cm_zero_center=False)
-                        # plot_3slices(y_batch_test[0,:,:,:,2].detach().cpu().numpy()-logits[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_error_Ey_r.png", my_cm=plt.cm.seismic)
-                        # plot_3slices(Ey_FD.real[0,:,:,:].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_Ey_FD.png", my_cm=plt.cm.seismic)
+                        plot_3slices(Hy_batch_test[0,:,:,:,2].detach().cpu().numpy()-logits[0,:,:,:,2].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_error_Ey_r.png", my_cm=plt.cm.seismic)
+                        # plot_3slices(Ey_FD.real[0,1:-1,1:-1,1:-1].detach().cpu().numpy(), model_path+"/plots/epoch_"+str(step)+"_Ey_FD.png", my_cm=plt.cm.seismic)
 
             test_data_loss /= len(test_loader)
             test_inner_loss /= len(test_loader)
@@ -430,7 +458,7 @@ def train(rank, args, train_ds, test_ds, means):
                     checkpoint = {
                                     'epoch': step,
                                     'model': model,
-                                    'state_dict': model.state_dict(),
+                                    # 'state_dict': model.state_dict(),
                                     'optimizer': optimizer,
                                     'lr_scheduler': lr_scheduler
                                  }

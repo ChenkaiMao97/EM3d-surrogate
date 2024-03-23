@@ -25,15 +25,15 @@ class BasicBlock3D(nn.Module):
         self.conv2 = nn.Conv3d(planes, planes, kernel_size=3,
                                stride=1, padding=1, bias=False)
         # self.bn2 = nn.BatchNorm2d(planes)
-
-        self.shortcut = nn.Sequential(nn.Identity())
-        if stride != 1 or in_planes != self.expansion*planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv3d(in_planes, self.expansion*planes,
-                          kernel_size=1, stride=stride, bias=False),
-                # nn.BatchNorm2d(self.expansion*planes)
-            )
         self.use_shortcut = use_shortcut
+        if self.use_shortcut:
+            self.shortcut = nn.Sequential(nn.Identity())
+            if stride != 1 or in_planes != self.expansion*planes:
+                self.shortcut = nn.Sequential(
+                    nn.Conv3d(in_planes, self.expansion*planes,
+                              kernel_size=1, stride=stride, bias=False),
+                    # nn.BatchNorm2d(self.expansion*planes)
+                )
 
     def forward(self, x):
         out = F.leaky_relu(self.conv1(x), negative_slope=self.ALPHA)
@@ -46,7 +46,7 @@ class BasicBlock3D(nn.Module):
 class BasicBlock3D_Periodic(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, ALPHA, stride=1, use_shortcut=True, periodic=(0,0,0)):
+    def __init__(self, in_planes, planes, ALPHA, stride=1, use_shortcut=True, periodic=(0,0,0), final_activation=True):
         # periodic: whether periodic in x, y and z
         super(BasicBlock3D_Periodic, self).__init__()
         self.ALPHA = ALPHA
@@ -70,21 +70,25 @@ class BasicBlock3D_Periodic(nn.Module):
                                stride=1, padding=0, bias=False)
         # self.bn2 = nn.BatchNorm2d(planes)
 
-        self.shortcut = nn.Sequential(nn.Identity())
-        if stride != 1 or in_planes != self.expansion*planes:
-            self.shortcut = nn.Sequential(
-                nn.Conv3d(in_planes, self.expansion*planes,
-                          kernel_size=1, stride=stride, bias=False),
-                # nn.BatchNorm2d(self.expansion*planes)
-            )
         self.use_shortcut = use_shortcut
+        if self.use_shortcut:
+            self.shortcut = nn.Sequential(nn.Identity())
+            if stride != 1 or in_planes != self.expansion*planes:
+                self.shortcut = nn.Sequential(
+                    nn.Conv3d(in_planes, self.expansion*planes,
+                              kernel_size=1, stride=stride, bias=False),
+                    # nn.BatchNorm2d(self.expansion*planes)
+                )
+
+        self.final_activation = final_activation
 
     def forward(self, x):
         out = F.leaky_relu(self.conv1(self.padding1(x)), negative_slope=self.ALPHA)
         out = self.conv2(self.padding2(out))
         if self.use_shortcut:
             out += self.shortcut(x)
-            out = F.leaky_relu(out, negative_slope=self.ALPHA)
+            if self.final_activation:
+                out = F.leaky_relu(out, negative_slope=self.ALPHA)
         return out
 
 ################################################################
@@ -92,7 +96,7 @@ class BasicBlock3D_Periodic(nn.Module):
 ################################################################
 
 class Modulated_SpectralConv3d(nn.Module):
-    def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
+    def __init__(self, in_channels, out_channels, ALPHA, modes1, modes2, modes3, periodic=False):
         super(Modulated_SpectralConv3d, self).__init__()
 
         """
@@ -104,35 +108,49 @@ class Modulated_SpectralConv3d(nn.Module):
         self.modes1 = modes1 #Number of Fourier modes to multiply, at most floor(N/2) + 1
         self.modes2 = modes2
         self.modes3 = modes3
+        self.periodic = periodic
+        self.ALPHA = ALPHA
 
-        self.scale = (1 / (in_channels * out_channels))
-        # self.scale = (1 / out_channels)
-        
-        self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
-        self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
-        self.weights3 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
-        self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
+        self.conv1 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv2 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv3 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv4 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+
+        self.conv5 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv6 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv7 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv8 = nn.Conv3d(2*self.in_channels, 2*self.out_channels, kernel_size=5, stride=1, padding=2, bias=False)
+
+        # self.scale = (1 / (in_channels * out_channels))
+        # self.weights1 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
+        # self.weights2 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
+        # self.weights3 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
+        # self.weights4 = nn.Parameter(self.scale * torch.rand(in_channels, out_channels, self.modes1, self.modes2, self.modes3, 2, dtype=torch.float32))
+
     # Complex multiplication
     def compl_mul3d(self, input, weights):
         # (batch, in_channel, x,y,t ), (in_channel, out_channel, x,y,t) -> (batch, out_channel, x,y,t)
         return torch.einsum("bixyz,bioxyz->boxyz", input, weights)
 
-    def forward(self, x, mods):
+    # def forward(self, x, mod1, mod2, mod3, mod4):
+    def forward(self, x):
         batchsize = x.shape[0]
         #Compute Fourier coeffcients up to factor of e^(- something constant)
         x_ft = torch.fft.rfftn(x, dim=[-3,-2,-1])
 
-        mod1, mod2, mod3, mod4= mods
         # Multiply relevant Fourier modes
         out_ft = torch.zeros(batchsize, self.out_channels, x.size(-3), x.size(-2), x.size(-1)//2+1, dtype=torch.cfloat, device=x.device)
-        out_ft[:, :, :self.modes1, :self.modes2, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], torch.view_as_complex(self.weights1)*mod1)
-        out_ft[:, :, -self.modes1:, :self.modes2, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3], torch.view_as_complex(self.weights2)*mod2)
-        out_ft[:, :, :self.modes1, -self.modes2:, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3], torch.view_as_complex(self.weights3)*mod3)
-        out_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3] = \
-            self.compl_mul3d(x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], torch.view_as_complex(self.weights4)*mod4)
+
+        out_ft[:, :, :self.modes1, :self.modes2, :self.modes3] = torch.view_as_complex(self.conv1(torch.cat((x_ft[:, :, :self.modes1, :self.modes2, :self.modes3].real, x_ft[:, :, :self.modes1, :self.modes2, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, self.modes1, self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+        out_ft[:, :, -self.modes1:, :self.modes2, :self.modes3] = torch.view_as_complex(self.conv2(torch.cat((x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3].real, x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, self.modes1, self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+        out_ft[:, :, :self.modes1, -self.modes2:, :self.modes3] = torch.view_as_complex(self.conv3(torch.cat((x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3].real, x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, self.modes1, self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+        out_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3] = torch.view_as_complex(self.conv4(torch.cat((x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3].real, x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, self.modes1, self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+
+        out_ft[:, :, self.modes1:-self.modes1, :self.modes2, :self.modes3] = torch.view_as_complex(self.conv5(torch.cat((x_ft[:, :, self.modes1:-self.modes1, :self.modes2, :self.modes3].real, x_ft[:, :, self.modes1:-self.modes1, :self.modes2, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, x.size(-3)-2*self.modes1, self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+        out_ft[:, :, :self.modes1, self.modes2:-self.modes2, :self.modes3] = torch.view_as_complex(self.conv6(torch.cat((x_ft[:, :, :self.modes1, self.modes2:-self.modes2, :self.modes3].real, x_ft[:, :, :self.modes1, self.modes2:-self.modes2, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, self.modes1, x.size(-2)-2*self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+        out_ft[:, :, self.modes1:-self.modes1, -self.modes2:, :self.modes3] = torch.view_as_complex(self.conv7(torch.cat((x_ft[:, :, self.modes1:-self.modes1, -self.modes2:, :self.modes3].real, x_ft[:, :, self.modes1:-self.modes1, -self.modes2:, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, x.size(-3)-2*self.modes1, self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+        out_ft[:, :, -self.modes1:, self.modes2:-self.modes2, :self.modes3] = torch.view_as_complex(self.conv8(torch.cat((x_ft[:, :, -self.modes1:, self.modes2:-self.modes2, :self.modes3].real, x_ft[:, :, -self.modes1:, self.modes2:-self.modes2, :self.modes3].imag), dim=1)).reshape([batchsize, self.out_channels, 2, self.modes1, x.size(-2)-2*self.modes2, self.modes3]).permute((0,1,3,4,5,2)).contiguous())
+        
 
         #Return to physical space
         x = torch.fft.irfftn(out_ft, s=(x.size(-3), x.size(-2), x.size(-1)))
@@ -183,7 +201,7 @@ class FNO_multimodal_3d(nn.Module):
         self.ws = []
 
         for i in range(self.num_fourier_layers):
-            self.convs.append(Modulated_SpectralConv3d(self.width, self.width, self.modes1, self.modes2, self.modes3))
+            self.convs.append(Modulated_SpectralConv3d(self.width, self.width, self.ALPHA, self.modes1, self.modes2, self.modes3, periodic=self.periodic))
             # self.ws.append(nn.Conv3d(self.width, self.width, 1))
             self.ws.append(BasicBlock3D_Periodic(self.width, self.width, self.ALPHA, use_shortcut=False, periodic=self.periodic))
         self.convs = nn.ModuleList(self.convs)
@@ -193,34 +211,32 @@ class FNO_multimodal_3d(nn.Module):
         self.fc2 = nn.Linear(128, args.outc)
 
         # the modulation branch of the network:
-        self.m_basic1 = BasicBlock3D_Periodic(self.input_data_channels, self.width, self.ALPHA, 1, periodic=self.periodic)
-        self.m_basic2 = BasicBlock3D_Periodic(self.width, 1, self.ALPHA, 1, periodic=self.periodic)
+        # self.m_basic1 = BasicBlock3D_Periodic(self.input_data_channels, self.width, self.ALPHA, 1, periodic=self.periodic)
+        # self.m_basic2 = BasicBlock3D_Periodic(self.width, self.width, self.ALPHA, 1, periodic=self.periodic)
         # self.m_basic3 = BasicBlock3D_Periodic(self.width, self.width, self.ALPHA, 1, periodic=self.periodic)
-        self.m_bc1 = nn.Linear(int(self.sizex*self.sizey*self.sizez/64), self.hidden_freq)
-        self.m_bc2_1 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
-        self.m_bc2_2 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
-        self.m_bc2_3 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
-        self.m_bc2_4 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
-        
+        # self.m_bc1 = nn.Linear(int(self.width*self.sizex*self.sizey*self.sizez/128), self.hidden_freq)
+        # self.m_bc2_1 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
+        # self.m_bc2_2 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
+        # self.m_bc2_3 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
+        # self.m_bc2_4 = nn.Linear(self.hidden_freq, self.modes1*self.modes2*self.modes3)
+
     def forward(self, yeex, yeey, yeez):
         batch_size = yeez.shape[0] # shape: [bs, sx, sy, sz]
         grid = self.get_grid(yeez.shape, yeez.device) # shape: [bs, sx, sy, sz, 3]
 
         input_data = torch.cat((yeex[:,:,:,:,None], yeey[:,:,:,:,None], yeez[:,:,:,:,None], grid), dim=-1) # shape: [bs, sx, sy, sz, 6]
 
-        mod_data = input_data.permute(0, 4, 1, 2, 3)
+        # mod_data = input_data.permute(0, 4, 1, 2, 3)
 
-        mod = F.avg_pool3d(self.m_basic1(mod_data),2)
-        mod = F.avg_pool3d(self.m_basic2(mod),2)
+        # mod = F.avg_pool3d(self.m_basic1(mod_data),(2,1,2))
+        # mod = F.avg_pool3d(self.m_basic2(mod),(2,1,2))
         # mod = F.avg_pool3d(self.m_basic3(mod),2)
-        mod = F.leaky_relu(self.m_bc1(mod.reshape((batch_size, -1))), negative_slope=self.ALPHA)
+        # mod = F.leaky_relu(self.m_bc1(mod.reshape((batch_size, -1))), negative_slope=self.ALPHA)
 
-        mod1 = self.m_bc2_1(mod).reshape((batch_size, 1, 1, self.modes1,self.modes2,self.modes3))
-        mod2 = self.m_bc2_2(mod).reshape((batch_size, 1, 1, self.modes1,self.modes2,self.modes3))
-        mod3 = self.m_bc2_3(mod).reshape((batch_size, 1, 1, self.modes1,self.modes2,self.modes3))
-        mod4 = self.m_bc2_4(mod).reshape((batch_size, 1, 1, self.modes1,self.modes2,self.modes3))
-
-        mods = (mod1, mod2, mod3, mod4)
+        # mod1 = self.m_bc2_1(mod).reshape((batch_size, 1,1, self.modes1,self.modes2,self.modes3))
+        # mod2 = self.m_bc2_2(mod).reshape((batch_size, 1,1, self.modes1,self.modes2,self.modes3))
+        # mod3 = self.m_bc2_3(mod).reshape((batch_size, 1,1, self.modes1,self.modes2,self.modes3))
+        # mod4 = self.m_bc2_4(mod).reshape((batch_size, 1,1, self.modes1,self.modes2,self.modes3))
 
         x = self.fc0(input_data) # shape: [16, 96, 96, 64, 8]
         x = x.permute(0, 4, 1, 2, 3)
@@ -230,15 +246,17 @@ class FNO_multimodal_3d(nn.Module):
         # x.shape: [16, 8, 96, 96, 84]
 
         for i in range(self.num_fourier_layers-1):
-            x1 = self.convs[i](x, mods)
+            # x1 = self.convs[i](x, mod1, mod2, mod3, mod4)
+            x1 = self.convs[i](x)
             x2 = self.ws[i](x)
+            x = x1 + x2 + x
+            x = F.leaky_relu(x, negative_slope=self.ALPHA)
+            # x = F.gelu(x)
 
-            # x = F.leaky_relu(x1 + x2 + x, negative_slope=self.ALPHA)
-            x = F.leaky_relu(x1 + x2, negative_slope=self.ALPHA) + x
-
-        x1 = self.convs[-1](x, mods)
+        # x1 = self.convs[-1](x, mod1, mod2, mod3, mod4)
+        x1 = self.convs[-1](x)
         x2 = self.ws[-1](x)
-        x = x1 + x2
+        x = x1 + x2 + x
 
         _,_,n,m,l = x.shape
         x = x[..., :n-self.padding_x, :m-self.padding_y, :l-self.padding_z]

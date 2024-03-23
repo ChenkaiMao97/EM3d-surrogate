@@ -14,12 +14,13 @@ sys.path.append("../utils")
 from ete_physics import *
 
 class SimulationDataset(Dataset):
-    def __init__(self, data_folder, z_min=45, z_max=138, cube_size=64, total_sample_number = None, transform = None, wl=800e-9, dL=12.5e-9, threshold=1e-4, data_format="npy"):
+    def __init__(self, data_folder, z_min=45, z_max=138, cube_size=64, bc_mult=1, total_sample_number = None, transform = None, wl=800e-9, dL=12.5e-9, threshold=1e-4, data_format="npy"):
         # strategy: loading data on the fly (especially when data is too big that doesn't fit into memory)
         self.root_dir = data_folder
         self.directories = os.listdir(self.root_dir) # make sure that data_folder only stores directories of samples 
         print(f"total number of folders: {len(self.directories)}")
 
+        self.bc_mult = bc_mult
         self.data_format = data_format
 
         self.threshold = threshold
@@ -132,7 +133,7 @@ class SimulationDataset(Dataset):
         bc_z_p = torch.cat([torch.view_as_real((f[: ,: ,-1]-f[: ,: ,-2])+1/2*(f[: ,: ,-1]+f[: ,: ,-2])*1j*2*np.pi*np.sqrt(yeez[: ,: ,-1])*self.dL/self.wl) for f in (Ex, Ey, Ez)], dim=-1)/torch.tensor(self.means[None,None,:])
         bc_z_n = torch.cat([torch.view_as_real((f[: ,: ,0 ]-f[: ,: ,1 ])+1/2*(f[: ,: ,0 ]+f[: ,: ,1 ])*1j*2*np.pi*np.sqrt(yeez[: ,: ,1 ])*self.dL/self.wl) for f in (Ex, Ey, Ez)], dim=-1)/torch.tensor(self.means[None,None,:])
 
-        bcs = torch.stack((bc_x_p, bc_x_n, bc_y_p, bc_y_n, bc_z_p, bc_z_n), dim = -2)
+        bcs = self.bc_mult * torch.stack((bc_x_p, bc_x_n, bc_y_p, bc_y_n, bc_z_p, bc_z_n), dim = -2)
 
         sample = {'field': field, 'bcs': bcs, 'yeex': yeex, 'yeey': yeey, 'yeez': yeez}
 

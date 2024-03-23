@@ -9,8 +9,8 @@ import sys
 sys.path.append("../models")
 
 sys.path.append("../dataloaders")
-# from simulation_dataset_DDM import SimulationDataset
-from simulation_dataset_DDM_webds import SimulationDataset
+from simulation_dataset_DDM import SimulationDataset
+# from simulation_dataset_DDM_webds import SimulationDataset
 
 sys.path.append("../utils")
 from ete_physics import *
@@ -21,7 +21,6 @@ from tqdm import tqdm
 import gc
 from functools import partial
 from itertools import islice
-import braceexpand
 
 import matplotlib 
 matplotlib.use('agg')
@@ -33,21 +32,23 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from fvcore.nn import FlopCountAnalysis
-import webdataset as wds
+# import webdataset as wds
 
 argparser = argparse.ArgumentParser()
 
 # general training args
 argparser.add_argument('--epoch', type=int, help='epoch number', default=100)
 argparser.add_argument('--batch_size', type=int, help='batch size', default=64)
-# argparser.add_argument("--data_folder", type=str, help='folder for the data', default="/scratch/groups/jonfan/UNet/data/data_generation_52_thick_8bar_Si/30k_new_wmin625")
-# argparser.add_argument("--data_format", type=str, help='data format', default="npy")
-argparser.add_argument("--data_path_train", type=str, help='folder for the data', default="")
-argparser.add_argument("--data_path_test", type=str, help='folder for the data', default="")
-argparser.add_argument("--ds_length", type=int, help='total samples in dataset', default=1000)
+argparser.add_argument("--data_folder", type=str, help='folder for the data', default="/scratch/groups/jonfan/UNet/data/data_generation_52_thick_8bar_Si/30k_new_wmin625")
+argparser.add_argument("--data_format", type=str, help='data format', default="npy")
+argparser.add_argument("--bc_mult", type=float, help='multipler for bcs', default=1)
+
+# argparser.add_argument("--data_path_train", type=str, help='folder for the data', default="")
+# argparser.add_argument("--data_path_test", type=str, help='folder for the data', default="")
+# argparser.add_argument("--ds_length", type=int, help='total samples in dataset', default=1000)
 
 
-# argparser.add_argument("--total_sample_number", type=int, help="total number of training and testing samples to take from the npy file (in case you don't want to use all the data there)", default=None)
+argparser.add_argument("--total_sample_number", type=int, help="total number of training and testing samples to take from the npy file (in case you don't want to use all the data there)", default=None)
 argparser.add_argument("--model_saving_path", type=str, help="the root dir to save checkpoints", default="") 
 argparser.add_argument("--model_file", type=str, help="the name of the model file to be imported", default="FNO3d") 
 argparser.add_argument("--model_name", type=str, help="name for the model, used for storing under the model_saving_path", default="test")
@@ -59,7 +60,8 @@ argparser.add_argument('--end_lr', type=float, help='final learning rate', defau
 argparser.add_argument("--weight_decay", type=float, help="l2 regularization coeff", default=1e-4)
 
 # args for FNO:
-argparser.add_argument("--HIDDEN_DIM", type=int, help='width of Unet, i.e. number of kernels of first block', default=64)
+argparser.add_argument("--HIDDEN_DIM", type=int, help='hidden dimension for FFT modes', default=64)
+argparser.add_argument("--HIDDEN_DIM_freq", type=int, help='hidden dimension for self modulaiton', default=64)
 argparser.add_argument("--ALPHA", type=float, help="negative slope of leaky relu", default=0.05)
 argparser.add_argument("--f_modes", type=int, help="number of lowest fourier terms to keep and transform", default=20)
 argparser.add_argument("--num_fourier_layers", type=int, help="number of lowest fourier terms to keep and transform", default=10)
@@ -189,7 +191,7 @@ def my_split_by_node(urls, rank, world_size):
     # print("rank: ", rank, "world_size: ", world_size)
     yield from islice(urls, rank, None, world_size)
 
-def train(rank, args, means):
+def train(rank, args, train_ds, test_ds, means):
     torch.cuda.set_device(rank)
     
     model_path = args.model_saving_path + '/' + args.model_name + \
@@ -213,8 +215,8 @@ def train(rank, args, means):
     FLOPs_recorded = False
     
     # use start_lr and end_lr to calculate lr update steps:
-    # total_steps = args.epoch*len(train_ds)/args.batch_size
-    total_steps = args.epoch*args.ds_length*0.9/args.batch_size
+    total_steps = args.epoch*len(train_ds)/args.batch_size
+    # total_steps = args.epoch*args.ds_length*0.9/args.batch_size
     update_times = np.log(args.end_lr/args.start_lr)/np.log(0.99)
     lr_update_steps = int(total_steps/update_times)
     if rank==0:
@@ -262,55 +264,65 @@ def train(rank, args, means):
                 # find_unused_parameters=True,
                 output_device=rank)
 
-    # train_sampler = wids.DistributedChunkedSampler(train_ds, chunksize=10, shuffle=True)
-    # test_sampler = wids.DistributedChunkedSampler(test_ds, chunksize=10, shuffle=True)
-
-    processing_means = partial(processing, means=means)
-
     each_GPU_batch_size = args.batch_size // args.world_size
 
-    my_partial_split_node = partial(my_split_by_node, rank=rank, world_size=args.world_size)
+    # train_sampler = wids.DistributedChunkedSampler(train_ds, chunksize=10, shuffle=True)
+    # test_sampler = wids.DistributedChunkedSampler(test_ds, chunksize=10, shuffle=True)
+    # processing_means = partial(processing, means=means)
+    # my_partial_split_node = partial(my_split_by_node, rank=rank, world_size=args.world_size)
+    # train_ds = wds.DataPipeline(
+    #     wds.SimpleShardList(args.data_path_train),
+    #     my_partial_split_node,
+    #     wds.split_by_worker,
+    #     wds.tarfile_to_samples(),
+    #     wds.decode("torch"),
+    #     wds.map(processing_means),
+    #     wds.batched(int(args.batch_size/args.world_size))
+    # )
+    # test_ds = wds.DataPipeline(
+    #     wds.SimpleShardList(args.data_path_test),
+    #     my_partial_split_node,
+    #     wds.split_by_worker,
+    #     wds.tarfile_to_samples(),
+    #     wds.decode("torch"),
+    #     wds.map(processing_means),
+    #     wds.batched(int(args.batch_size/args.world_size))
+    # )
+    # train_loader = wds.WebLoader(train_ds, num_workers=4)
+    # test_loader = wds.WebLoader(test_ds, num_workers=4)
 
-    train_ds = wds.DataPipeline(
-        wds.SimpleShardList(args.data_path_train),
-        my_partial_split_node,
-        wds.split_by_worker,
-        wds.tarfile_to_samples(),
-        wds.decode("torch"),
-        wds.map(processing_means),
-        wds.batched(int(args.batch_size/args.world_size))
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_ds,
+        num_replicas=args.world_size,
+        rank=rank,
+        shuffle=True
     )
 
-    test_ds = wds.DataPipeline(
-        wds.SimpleShardList(args.data_path_test),
-        my_partial_split_node,
-        wds.split_by_worker,
-        wds.tarfile_to_samples(),
-        wds.decode("torch"),
-        wds.map(processing_means),
-        wds.batched(int(args.batch_size/args.world_size))
+    test_sampler = torch.utils.data.distributed.DistributedSampler(
+        test_ds,
+        num_replicas=args.world_size,
+        rank=rank,
+        shuffle=True
     )
-
-    train_loader = wds.WebLoader(train_ds, num_workers=4)
-    test_loader = wds.WebLoader(test_ds, num_workers=4)
     
-    # train_loader = torch.utils.data.DataLoader(
-    #     dataset=train_ds_rank,
-    #     batch_size=each_GPU_batch_size,
-    #     shuffle=False,
-    #     num_workers=4,
-    #     pin_memory=False,
-    #     sampler=train_sampler)
+    train_loader = torch.utils.data.DataLoader(
+        dataset=train_ds,
+        batch_size=each_GPU_batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=False,
+        sampler=train_sampler)
 
-    # test_loader = torch.utils.data.DataLoader(
-    #     dataset=test_ds_rank,
-    #     batch_size=each_GPU_batch_size,
-    #     shuffle=False,
-    #     num_workers=4,
-    #     pin_memory=False,
-    #     sampler=test_sampler)
+    test_loader = torch.utils.data.DataLoader(
+        dataset=test_ds,
+        batch_size=each_GPU_batch_size,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=False,
+        sampler=test_sampler)
 
-    total_step = int(args.ds_length*0.9/args.batch_size)
+    # total_step = int(args.ds_length*0.9/args.batch_size)
+    total_step = len(train_loader)
     gradient_count = 0
     best_loss = 1e4
 
@@ -321,8 +333,8 @@ def train(rank, args, means):
     running_inner_loss = 10.
     
     for step in range(start_epoch, args.epoch):
-        # train_sampler.set_epoch(step)
-        # test_sampler.set_epoch(step)
+        train_sampler.set_epoch(step)
+        test_sampler.set_epoch(step)
         epoch_start_time = timeit.default_timer()
         if rank==0:
             print("epoch: ", step, flush=True)
@@ -333,9 +345,8 @@ def train(rank, args, means):
             gradient_count += 1
             optimizer.zero_grad(set_to_none=True)
 
-            y_batch_train, bcs_batch_train, yeex_batch_train, yeey_batch_train, yeez_batch_train = sample_batched
-            y_batch_train, bcs_batch_train, yeez_batch_train = y_batch_train[0].to(rank), bcs_batch_train[0].to(rank), yeez_batch_train[0].to(rank)
-
+            y_batch_train, bcs_batch_train, yeez_batch_train = sample_batched['field'].to(rank), sample_batched['bcs'].to(rank), sample_batched['yeez'].to(rank)
+            
             # record FLOPs for once:
             if not FLOPs_recorded and rank==0:
                 FLOPs_recorded = True
@@ -401,7 +412,7 @@ def train(rank, args, means):
         checkpoint = {
                     'epoch': step,
                     'model': model,
-                    'state_dict': model.state_dict(),
+                    # 'state_dict': model.state_dict(),
                     'optimizer': optimizer,
                     'lr_scheduler': lr_scheduler
                  }
@@ -418,9 +429,8 @@ def train(rank, args, means):
         test_inner_loss = torch.tensor(0.).cuda()
         if step % 5 == 0:
             for idx, sample_batched in enumerate(test_loader):
-                y_batch_test, bcs_batch_test, yeex_batch_test, yeey_batch_test, yeez_batch_test = sample_batched
-                y_batch_test, bcs_batch_test, yeez_batch_test = y_batch_test[0].to(rank), bcs_batch_test[0].to(rank), yeez_batch_test[0].to(rank)
-
+                y_batch_test, bcs_batch_test, yeez_batch_test = sample_batched['field'].to(rank), sample_batched['bcs'].to(rank), sample_batched['yeez'].to(rank)
+            
                 with torch.no_grad():
                     logits = model(yeez_batch_test, bcs_batch_test)
                     logits = logits.reshape(y_batch_test.shape)
@@ -476,7 +486,7 @@ def train(rank, args, means):
                     checkpoint = {
                                     'epoch': step,
                                     'model': model,
-                                    'state_dict': model.state_dict(),
+                                    # 'state_dict': model.state_dict(),
                                     'optimizer': optimizer,
                                     'lr_scheduler': lr_scheduler
                                  }
@@ -495,21 +505,15 @@ def main(args):
     print("GPUs to use: ", args.gpus)
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpus)
 
-    # ds = SimulationDataset(args.data_folder, total_sample_number = args.total_sample_number, cube_size=args.cube_size, data_format=args.data_format)
-    # means = ds.means
-    # train_ds, test_ds = random_split(ds, [int(0.9*len(ds)), len(ds) - int(0.9*len(ds))])
-
-    means = np.array([0.00037015, 0.00037738, 0.00017998, 0.00017892, 0.00022806, 0.00022944])
-    print("means is: ", means)
-
-    # train_ds = SimulationDataset(args.data_path_train, cube_size=args.cube_size, means=means)
-    # test_ds = SimulationDataset(args.data_path_test, cube_size=args.cube_size, means=means)
+    ds = SimulationDataset(args.data_folder, total_sample_number = args.total_sample_number, cube_size=args.cube_size, bc_mult = args.bc_mult, data_format=args.data_format)
+    means = ds.means
+    train_ds, test_ds = random_split(ds, [int(0.9*len(ds)), len(ds) - int(0.9*len(ds))])
 
     assert args.batch_size % args.world_size == 0
     
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12345'
-    mp.spawn(train, nprocs=args.world_size, args=(args, means))
+    mp.spawn(train, nprocs=args.world_size, args=(args, train_ds, test_ds, means))
 
 if __name__ == '__main__':
     torch.set_default_tensor_type(torch.FloatTensor)
