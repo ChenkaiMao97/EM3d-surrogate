@@ -9,7 +9,7 @@ docker run -v /home/chenkaim/scripts/models/EM3d-surrogate/FNO3d:/workspace \
 
             python3 train_ete_FNO_aperiodic_DDP.py \
                 --model_name superpixel_ete_8freqs_conv_no_src_in_PML_10k \
-                --model_file FNO3d_SM_ete_light \
+                --model_file FNO3d_SM_ete_conv \
                 --model_saving_path /media/lts0/chenkaim/checkpoints/EM3d/ \
                 --data_folder /media/lts0/chenkaim/3d_data/SR_aperiodic_TiO2_no_src_in_PML \
                 --f_modes_x 20 \
@@ -18,8 +18,8 @@ docker run -v /home/chenkaim/scripts/models/EM3d-surrogate/FNO3d:/workspace \
                 --periodic_x 0 \
                 --periodic_y 0 \
                 --periodic_z 0 \
-                --HIDDEN_DIM 32 \
-                --HIDDEN_DIM_freq 64 \
+                --HIDDEN_DIM 20 \
+                --HIDDEN_DIM_freq 32 \
                 --num_fourier_layers 6 \
                 --domain_sizex 64 \
                 --domain_sizey 64 \
@@ -36,9 +36,9 @@ docker run -v /home/chenkaim/scripts/models/EM3d-surrogate/FNO3d:/workspace \
                 --data_weight 1 \
                 --inner_weight 1 \
                 --phys_start_epoch 100 \
-                --batch_size 16 \
-                --world_size 1 \
-                --gpus 4 \
+                --batch_size 32 \
+                --world_size 2 \
+                --gpus 3,4 \
                 --seed 0
                 > ${out_file} 2>&1"
 
